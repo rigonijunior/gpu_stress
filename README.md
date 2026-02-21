@@ -37,8 +37,8 @@ Ferramenta de linha de comando para estresse e monitoramento de GPUs NVIDIA RTX,
 ## 🚀 Instalação
 
 ```bash
-git clone https://github.com/SEU_USUARIO/gpu-stress-tester.git
-cd gpu-stress-tester
+git clone git@github.com:rigonijunior/gpu_stress.git
+cd gpu_stress
 
 # Criar venv e instalar dependências
 python3 -m venv venv
