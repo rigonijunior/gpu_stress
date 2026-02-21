@@ -22,6 +22,7 @@ import signal
 import warnings
 import datetime
 import traceback
+import subprocess
 import multiprocessing as mp
 
 # Suppress pynvml deprecation warning
@@ -236,10 +237,158 @@ def _worker_mix(gpu_index, abort_event):
         traceback.print_exc()
 
 
+def _worker_pcie(gpu_index, abort_event):
+    """Heavy Host-to-Device and Device-to-Host transfers to stress PCIe/NVLink."""
+    import torch
+    try:
+        dev = torch.device(f"cuda:{gpu_index}")
+        torch.cuda.set_device(dev)
+        
+        # ~256MB chunks for large DMA transfers
+        size = 64 * 1024 * 1024
+        
+        # Pinned memory ensures max PCIe bandwidth
+        host_tensor = torch.randn(size, pin_memory=True)
+        device_tensor = torch.empty(size, device=dev)
+        
+        while not abort_event.is_set():
+            for _ in range(_BATCH_ITERS):
+                # Copy H2D
+                device_tensor.copy_(host_tensor, non_blocking=True)
+                # Copy D2H
+                host_tensor.copy_(device_tensor, non_blocking=True)
+            torch.cuda.synchronize(dev)
+    except Exception:
+        traceback.print_exc()
+
+
+def _worker_transient(gpu_index, abort_event):
+    """Spikes GPU load 0% to 100% rapidly to test PSU stability."""
+    import time
+    import torch
+    try:
+        dev = torch.device(f"cuda:{gpu_index}")
+        torch.cuda.set_device(dev)
+        
+        size = 8192
+        a32 = torch.randn(size, size, device=dev)
+        b32 = torch.randn(size, size, device=dev)
+        
+        while not abort_event.is_set():
+            # 100% Load spike
+            for _ in range(20):
+                torch.matmul(a32, b32)
+            torch.cuda.synchronize(dev)
+            
+            # 0% Load sleep (creates a transient power spike when waking up)
+            time.sleep(0.1)
+    except Exception:
+        traceback.print_exc()
+
+
+def _worker_nvenc(gpu_index, abort_event):
+    """Uses ffmpeg to stress NVENC/NVDEC chips on the GPU."""
+    import time
+    import subprocess
+    try:
+        # Generate 4K dummy video and hard encode to null via NVENC
+        cmd = [
+            "ffmpeg", "-y", "-hwaccel", "cuda", "-hwaccel_device", str(gpu_index),
+            "-f", "lavfi", "-i", "testsrc=duration=3600:size=3840x2160:rate=60",
+            "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-b:v", "50M",
+            "-f", "null", "-"
+        ]
+        
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        while not abort_event.is_set():
+            # Restart if process fails or ends
+            if proc.poll() is not None:
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1.0)
+            
+        proc.terminate()
+        proc.wait()
+    except Exception:
+        traceback.print_exc()
+
+
+def _worker_training(gpu_index, abort_event):
+    """Simulates real-world AI training (Linear layers, Loss, Backprop)."""
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    try:
+        dev = torch.device(f"cuda:{gpu_index}")
+        torch.cuda.set_device(dev)
+        
+        # Build an overly wide MLP to saturate CUDA cores + memory
+        model = nn.Sequential(
+            nn.Linear(8192, 8192),
+            nn.ReLU(),
+            nn.Linear(8192, 8192),
+            nn.ReLU(),
+            nn.Linear(8192, 1000)
+        ).to(dev)
+        
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        criterion = nn.MSELoss()
+        
+        batch_size = 512
+        inputs = torch.randn(batch_size, 8192, device=dev)
+        targets = torch.randn(batch_size, 1000, device=dev)
+        
+        while not abort_event.is_set():
+            # Train loop
+            for _ in range(10): # Smaller inner loop for heavy graph ops
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+            torch.cuda.synchronize(dev)
+    except Exception:
+        traceback.print_exc()
+
+
+def _worker_precision(gpu_index, abort_event):
+    """Stresses non-standard calculations (FP64 and FP16 combined logic)."""
+    import torch
+    try:
+        dev = torch.device(f"cuda:{gpu_index}")
+        torch.cuda.set_device(dev)
+        
+        # Consumer cards are notoriously slow at FP64 (usually 1:64 ratio),
+        # so this is massive queue stress.
+        size = 4096
+        a64 = torch.randn(size, size, device=dev, dtype=torch.float64)
+        b64 = torch.randn(size, size, device=dev, dtype=torch.float64)
+        
+        # We also stress torch matrix int-like ops (FP16/BrainFloat natively supported)
+        a16 = torch.randn(size, size, device=dev, dtype=torch.float16)
+        b16 = torch.randn(size, size, device=dev, dtype=torch.float16)
+
+        while not abort_event.is_set():
+            for _ in range(_BATCH_ITERS):
+                # Heavy FP64 bottleneck
+                torch.matmul(a64, b64)
+                # Super fast FP16
+                torch.matmul(a16, b16)
+                # Intertwining them breaks branch prediction / pipeline
+            torch.cuda.synchronize(dev)
+    except Exception:
+        traceback.print_exc()
+
+
 STRESS_FUNCTIONS = {
     "compute": _worker_compute,
     "vram": _worker_vram,
     "mix": _worker_mix,
+    "pcie": _worker_pcie,
+    "transient": _worker_transient,
+    "nvenc": _worker_nvenc,
+    "training": _worker_training,
+    "precision": _worker_precision,
 }
 
 
@@ -401,6 +550,11 @@ def main():
             questionary.Choice("Compute — Multiplicação de matrizes (estresse nos CUDA cores)", "compute"),
             questionary.Choice("VRAM — Alocação máxima de memória de vídeo", "vram"),
             questionary.Choice("Misto — Compute + VRAM simultaneamente", "mix"),
+            questionary.Choice("PCIe/NVLink — Transferências massivas Host <-> Device", "pcie"),
+            questionary.Choice("Picos de Energia (Transient) — Carga oscilante (0 a 100%)", "transient"),
+            questionary.Choice("NVENC/Video — Teste isolado no chip de codificação de vídeo", "nvenc"),
+            questionary.Choice("Treinamento de IA — Simulação de Finetuning de Rede Neural", "training"),
+            questionary.Choice("Precisão — Alta carga matemática FP64 e INT8", "precision"),
         ],
     ).ask()
     if not mode:
@@ -430,7 +584,16 @@ def main():
         dur_choice = int(raw)
 
     duration_s = dur_choice
-    mode_labels = {"compute": "Compute", "vram": "VRAM", "mix": "Misto"}
+    mode_labels = {
+        "compute": "Compute", 
+        "vram": "VRAM", 
+        "mix": "Misto",
+        "pcie": "PCIe/NVLink",
+        "transient": "Transient",
+        "nvenc": "Video/NVenc",
+        "training": "IA Training",
+        "precision": "Precisão",
+    }
 
     # ── Launch workers ──
     abort_event = mp.Event()

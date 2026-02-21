@@ -2,3 +2,4 @@ torch
 pynvml
 rich
 questionary
+ffmpeg-python
