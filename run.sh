@@ -1,4 +1,5 @@
 #!/bin/bash
+clear
 # ─── GPU Stress Tester Launcher ───
 # Ativa o venv e executa o script principal.
 
