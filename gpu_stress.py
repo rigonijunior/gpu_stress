@@ -778,18 +778,43 @@ def main():
 
     pynvml.nvmlShutdown()
 
-    # ── Save JSON ──
+    # ── Save JSON to log/ directory ──
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(base_dir, "log")
+    os.makedirs(log_dir, exist_ok=True)
+
     ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"gpu_report_{ts_str}.json")
+    json_filename = f"gpu_report_{ts_str}.json"
+    out_path = os.path.join(log_dir, json_filename)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
+
+    # ── Update log/index.json manifest ──
+    index_path = os.path.join(log_dir, "index.json")
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            index = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        index = {"reports": []}
+
+    index["reports"].append({
+        "file": json_filename,
+        "mode": mode,
+        "date": report.get("test_started", ""),
+        "duration": report.get("total_elapsed_s", 0),
+        "result": status,
+    })
+
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2, ensure_ascii=False)
 
     console.print()
     console.print(Panel.fit(
         f"[bold green]Teste finalizado![/bold green]\n"
         f"Status: {status}\n"
         f"Duração total: {str(datetime.timedelta(seconds=int(end_ts - start_ts)))}\n"
-        f"Relatório: [link=file://{out_path}]{out_path}[/link]",
+        f"JSON:  [link=file://{out_path}]{out_path}[/link]\n"
+        f"HTML:  [bold cyan]report.html[/bold cyan] (abra no navegador)",
         title="Resultado",
         border_style="green",
     ))

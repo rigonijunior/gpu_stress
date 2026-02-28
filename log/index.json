@@ -1,0 +1,46 @@
+{
+  "reports": [
+    {
+      "file": "gpu_report_20260221_142315.json",
+      "mode": "vram",
+      "date": "2026-02-21T14:20:27.886369",
+      "duration": 167.7,
+      "result": "Interrompido pelo usuário (CTRL+C)"
+    },
+    {
+      "file": "gpu_report_20260221_142836.json",
+      "mode": "compute",
+      "date": "2026-02-21T14:28:36",
+      "duration": 300,
+      "result": "Concluído ✅"
+    },
+    {
+      "file": "gpu_report_20260221_143717.json",
+      "mode": "mix",
+      "date": "2026-02-21T14:37:17",
+      "duration": 300,
+      "result": "Concluído ✅"
+    },
+    {
+      "file": "gpu_report_20260221_181550.json",
+      "mode": "transient",
+      "date": "2026-02-21T18:00:49.388408",
+      "duration": 900,
+      "result": "Concluído ✅"
+    },
+    {
+      "file": "gpu_report_20260221_192635.json",
+      "mode": "compute",
+      "date": "2026-02-21T19:26:35",
+      "duration": 300,
+      "result": "Concluído ✅"
+    },
+    {
+      "file": "gpu_report_20260221_194437.json",
+      "mode": "mix",
+      "date": "2026-02-21T19:44:37",
+      "duration": 300,
+      "result": "Concluído ✅"
+    }
+  ]
+}
