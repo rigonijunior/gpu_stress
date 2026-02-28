@@ -23,7 +23,6 @@ try:
     from rich.table import Table
     from rich.panel import Panel
     from rich.text import Text
-    from rich.columns import Columns
     from rich.align import Align
     from rich import box
 except ImportError:
@@ -33,7 +32,6 @@ except ImportError:
     from rich.table import Table
     from rich.panel import Panel
     from rich.text import Text
-    from rich.columns import Columns
     from rich.align import Align
     from rich import box
 
@@ -56,28 +54,60 @@ MODE_LABELS = {
 
 
 def _fmt_duration(seconds):
-    """Pretty format seconds into HH:MM:SS."""
     return str(datetime.timedelta(seconds=int(seconds)))
 
 
-def _sparkline(values, width=50):
-    """Generate an ASCII sparkline chart from a list of numbers."""
+def _sparkline_rich(values, width=None):
+    """Generate a full-width Rich Text sparkline with color gradient."""
     if not values:
-        return ""
+        return Text("")
+    if width is None:
+        width = max(console.size.width - 10, 40)
     mn, mx = min(values), max(values)
     span = mx - mn if mx != mn else 1
     blocks = " ▁▂▃▄▅▆▇█"
-    line = ""
-    # Resample values to fit width
+
     if len(values) > width:
         step = len(values) / width
         sampled = [values[int(i * step)] for i in range(width)]
     else:
         sampled = values
+
+    line = Text()
     for v in sampled:
-        idx = int((v - mn) / span * (len(blocks) - 1))
-        line += blocks[idx]
+        ratio = (v - mn) / span
+        idx = int(ratio * (len(blocks) - 1))
+        # Color gradient: cyan → green → yellow → red
+        if ratio >= 0.85:
+            style = "bold red"
+        elif ratio >= 0.65:
+            style = "yellow"
+        elif ratio >= 0.35:
+            style = "green"
+        else:
+            style = "cyan"
+        line.append(blocks[idx], style=style)
     return line
+
+
+def _big_bar(value, maximum, width=40, label=""):
+    """Create a large visual bar with percentage."""
+    if maximum <= 0:
+        return ""
+    pct = min(value / maximum * 100, 100)
+    filled = int(round(pct / 100 * width))
+    empty = width - filled
+
+    if pct >= 90:
+        color = "red"
+    elif pct >= 70:
+        color = "yellow"
+    elif pct >= 40:
+        color = "green"
+    else:
+        color = "cyan"
+
+    return f"[{color}]{'█' * filled}[/{color}][dim]{'░' * empty}[/dim] {pct:.0f}% {label}"
 
 
 def _temp_color(temp_c):
@@ -92,23 +122,15 @@ def _temp_color(temp_c):
     return "cyan"
 
 
-def _verdict_color(verdict):
-    if verdict == "APROVADO":
-        return "bold green"
-    if verdict == "ATENÇÃO":
-        return "bold yellow"
-    return "bold red"
-
-
 def _safe_stdev(values):
     if len(values) < 2:
         return 0.0
     return statistics.stdev(values)
 
+
 # ─────────────────────── STATISTICS ───────────────────────────
 
 def compute_gpu_stats(snapshots, gpu_idx):
-    """Extract per-GPU statistics from all snapshots."""
     metrics = {
         "temp_c": [], "power_w": [], "util_gpu": [], "util_mem": [],
         "mem_used_gb": [], "mem_pct": [], "fan_pct": [],
@@ -144,7 +166,6 @@ def compute_gpu_stats(snapshots, gpu_idx):
 # ─────────────────────── RENDER ───────────────────────────────
 
 def render_header(report):
-    """Render the top summary panel."""
     config = report.get("config", {})
     mode = config.get("mode", "?")
     mode_label = MODE_LABELS.get(mode, mode)
@@ -152,25 +173,20 @@ def render_header(report):
     total = report.get("total_elapsed_s", 0)
     result = report.get("result", "?")
 
-    # GPU list
     gpus_list = config.get("gpus", [])
     gpu_names = ", ".join(f"GPU {g[0]}: {g[1]}" for g in gpus_list)
 
-    # Parse dates
     started = report.get("test_started", "?")
     ended = report.get("test_ended", "?")
     try:
-        dt_start = datetime.datetime.fromisoformat(started)
-        started = dt_start.strftime("%d/%m/%Y %H:%M:%S")
+        started = datetime.datetime.fromisoformat(started).strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
         pass
     try:
-        dt_end = datetime.datetime.fromisoformat(ended)
-        ended = dt_end.strftime("%d/%m/%Y %H:%M:%S")
+        ended = datetime.datetime.fromisoformat(ended).strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
         pass
 
-    # Result style
     if "Concluído" in result or "✅" in result:
         result_style = "bold green"
     elif "Interrompido" in result:
@@ -178,253 +194,274 @@ def render_header(report):
     else:
         result_style = "bold red"
 
-    t = Table(show_header=False, box=None, expand=True, padding=(0, 2))
-    t.add_column("label", style="bold cyan", min_width=22)
-    t.add_column("value", style="white", ratio=1)
-
-    t.add_row("📋 Modo de Teste:", f"[bold]{mode_label}[/bold]")
-    t.add_row("🖥️  GPU(s):", gpu_names)
-    t.add_row("⏱️  Duração Solicitada:", _fmt_duration(dur_req) if dur_req > 0 else "Indefinida")
-    t.add_row("⏱️  Duração Real:", _fmt_duration(total))
-    t.add_row("📅 Início:", started)
-    t.add_row("📅 Término:", ended)
-    t.add_row("📊 Snapshots:", str(len(report.get("snapshots", []))))
-    t.add_row("🏁 Resultado:", Text(result, style=result_style))
+    lines = Text()
+    lines.append("  📋 Modo:       ", style="bold cyan")
+    lines.append(f"{mode_label}\n", style="bold white")
+    lines.append("  �️  GPU(s):     ", style="bold cyan")
+    lines.append(f"{gpu_names}\n", style="white")
+    lines.append("  ⏱️  Solicitado:  ", style="bold cyan")
+    lines.append(f"{_fmt_duration(dur_req) if dur_req > 0 else 'Indefinida'}\n", style="white")
+    lines.append("  ⏱️  Real:        ", style="bold cyan")
+    lines.append(f"{_fmt_duration(total)}\n", style="white")
+    lines.append("  📅 Início:      ", style="bold cyan")
+    lines.append(f"{started}\n", style="white")
+    lines.append("  📅 Término:     ", style="bold cyan")
+    lines.append(f"{ended}\n", style="white")
+    lines.append("  📊 Snapshots:   ", style="bold cyan")
+    lines.append(f"{len(report.get('snapshots', []))}\n", style="white")
+    lines.append("  🏁 Resultado:   ", style="bold cyan")
+    lines.append(f"{result}", style=result_style)
 
     console.print(Panel(
-        t,
-        title="[bold white]═══ RESUMO DO TESTE ═══[/bold white]",
+        lines,
+        title="[bold white]══ RESUMO DO TESTE ══[/bold white]",
         border_style="bright_blue",
         box=box.DOUBLE_EDGE,
-        padding=(1, 2),
+        padding=(1, 1),
     ))
 
 
-def render_gpu_stats(stats, gpu_idx, gpu_name, peak_data):
-    """Render detailed stats for a single GPU."""
-    # ── Stats Table ──
-    t = Table(
-        title=f"[bold]📊 Estatísticas Detalhadas[/bold]",
-        box=box.SIMPLE_HEAVY,
-        expand=True,
-        show_lines=True,
-    )
-    t.add_column("Métrica", style="bold cyan", min_width=18)
-    t.add_column("Mínimo", style="green", justify="right", min_width=10)
-    t.add_column("Média", style="yellow", justify="right", min_width=10)
-    t.add_column("Máximo", style="red", justify="right", min_width=10)
-    t.add_column("σ (Desvio)", style="dim", justify="right", min_width=10)
-    t.add_column("Sparkline", min_width=30)
+def render_gpu_section(stats, gpu_idx, gpu_name, peak_data):
+    """Render a complete GPU analysis section — clean and large."""
+
+    console.print()
+    console.print(f"  [bold magenta]{'═' * 60}[/bold magenta]")
+    console.print(f"  [bold magenta]  GPU {gpu_idx}: {gpu_name}[/bold magenta]")
+    console.print(f"  [bold magenta]{'═' * 60}[/bold magenta]")
+    console.print()
+
+    # ── Simple 4-column stats table (no sparklines) ──
+    t = Table(box=box.ROUNDED, expand=True, show_lines=True, padding=(0, 1))
+    t.add_column("Métrica", style="bold cyan", min_width=16)
+    t.add_column("Mín", style="green", justify="right", min_width=12)
+    t.add_column("Média", style="yellow", justify="right", min_width=12)
+    t.add_column("Máx", style="red", justify="right", min_width=12)
 
     rows = [
-        ("🌡  Temperatura", "temp_c", "°C", _temp_color),
-        ("⚡ Potência", "power_w", " W", None),
-        ("📊 GPU Load", "util_gpu", "%", None),
-        ("📊 Mem Bus Load", "util_mem", "%", None),
-        ("💾 VRAM Usada", "mem_used_gb", " GB", None),
-        ("💾 VRAM %", "mem_pct", "%", None),
-        ("🌀 Fan", "fan_pct", "%", None),
-        ("🕐 Core Clock", "clock_core_mhz", " MHz", None),
-        ("🕐 Mem Clock", "clock_mem_mhz", " MHz", None),
+        ("🌡  Temperatura", "temp_c", "°C"),
+        ("⚡ Potência", "power_w", " W"),
+        ("📊 GPU Load", "util_gpu", "%"),
+        ("📊 Mem Bus", "util_mem", "%"),
+        ("💾 VRAM", "mem_used_gb", " GB"),
+        ("💾 VRAM %", "mem_pct", "%"),
+        ("🌀 Fan", "fan_pct", "%"),
+        ("🕐 Core Clk", "clock_core_mhz", " MHz"),
+        ("🕐 Mem Clk", "clock_mem_mhz", " MHz"),
     ]
 
-    for label, key, unit, color_fn in rows:
+    for label, key, unit in rows:
         s = stats.get(key, {})
         if not s.get("values"):
             continue
-        # Skip fan if all negative (water cooled)
         if key == "fan_pct" and s["max"] < 0:
             continue
 
-        spark = _sparkline(s["values"])
-
-        # Color max temp
-        max_style = ""
-        if color_fn:
-            max_style = color_fn(s["max"])
-            max_val = f"[{max_style}]{s['max']}{unit}[/{max_style}]"
+        # Color the max temperature
+        if key == "temp_c":
+            tc = _temp_color(s["max"])
+            max_val = f"[{tc}]{s['max']}{unit}[/{tc}]"
         else:
             max_val = f"{s['max']}{unit}"
 
-        t.add_row(
-            label,
-            f"{s['min']}{unit}",
-            f"{s['avg']}{unit}",
-            max_val,
-            f"±{s['stdev']}{unit}",
-            spark,
-        )
+        t.add_row(label, f"{s['min']}{unit}", f"{s['avg']}{unit}", max_val)
 
-    # ── Peak Data (from report) ──
-    peak_table = None
+    console.print(t)
+
+    # ── Peak summary (horizontal, compact) ──
     if peak_data:
-        peak_table = Table(
-            title="[bold]🏆 Picos Registrados[/bold]",
-            box=box.SIMPLE_HEAVY,
-            expand=True,
-        )
-        peak_table.add_column("Métrica", style="bold cyan")
-        peak_table.add_column("Valor", style="bold white", justify="right")
-
+        console.print()
         tc = _temp_color(peak_data.get("max_temp_c", 0))
-        peak_table.add_row("🌡  Temp. Máxima", f"[{tc}]{peak_data.get('max_temp_c', '?')} °C[/{tc}]")
-        peak_table.add_row("⚡ Potência Máxima", f"{peak_data.get('max_power_w', '?')} W")
-        peak_table.add_row("💾 VRAM Máxima", f"{peak_data.get('max_mem_used_gb', '?')} GB")
-        peak_table.add_row("📊 GPU Load Médio", f"{peak_data.get('avg_util_gpu', '?')}%")
+        peak_text = Text()
+        peak_text.append("  🏆 Picos:  ", style="bold white")
+        peak_text.append(f"Temp ", style="dim")
+        peak_text.append(f"{peak_data.get('max_temp_c', '?')}°C", style=tc)
+        peak_text.append(f"  │  ", style="dim")
+        peak_text.append(f"Power ", style="dim")
+        peak_text.append(f"{peak_data.get('max_power_w', '?')} W", style="bold white")
+        peak_text.append(f"  │  ", style="dim")
+        peak_text.append(f"VRAM ", style="dim")
+        peak_text.append(f"{peak_data.get('max_mem_used_gb', '?')} GB", style="bold white")
+        peak_text.append(f"  │  ", style="dim")
+        peak_text.append(f"Load Médio ", style="dim")
+        peak_text.append(f"{peak_data.get('avg_util_gpu', '?')}%", style="bold white")
+        console.print(peak_text)
+
+    # ── Full-width sparkline graphs (one per line, easy to read) ──
+    console.print()
+    console.print("  [bold white]📈 Gráficos Temporais[/bold white]")
+    console.print()
+
+    spark_width = max(console.size.width - 20, 30)
+
+    spark_items = [
+        ("  🌡  Temp    ", "temp_c", "°C"),
+        ("  ⚡ Power   ", "power_w", " W"),
+        ("  📊 GPU %   ", "util_gpu", "%"),
+        ("  💾 VRAM %  ", "mem_pct", "%"),
+    ]
+
+    for label, key, unit in spark_items:
+        s = stats.get(key, {})
+        vals = s.get("values", [])
+        if not vals:
+            continue
+
+        # Label with range
+        header = Text()
+        header.append(label, style="bold cyan")
+        header.append(f"[{s['min']}{unit} → {s['max']}{unit}]", style="dim")
+        console.print(header)
+
+        # Full-width sparkline
+        spark = _sparkline_rich(vals, width=spark_width)
+        console.print(f"  ", end="")
+        console.print(spark)
+        console.print()
+
+    # ── Timeline heatmap (3 wide rows) ──
+    render_heatmap(stats)
 
     # ── Health Verdict ──
+    render_verdict(stats)
+
+
+def render_heatmap(stats):
+    """Wide colorful heatmap blocks for temp, power, load."""
+    temps = stats.get("temp_c", {}).get("values", [])
+    if not temps:
+        return
+
+    bar_width = max(console.size.width - 20, 30)
+
+    console.print("  [bold white]🗺️  Heatmap[/bold white]")
+    console.print()
+
+    def _build_heatmap_line(values, thresholds):
+        """thresholds: list of (limit, style) from highest to lowest."""
+        step = max(1, len(values) // bar_width)
+        line = Text()
+        # Use wider blocks ██ for better visibility
+        for i in range(0, len(values), step):
+            v = values[i]
+            style = thresholds[-1][1]  # default
+            for limit, s in thresholds:
+                if v >= limit:
+                    style = s
+                    break
+            line.append("██", style=style)
+        return line
+
+    # Temperature
+    console.print("  [bold cyan]🌡  Temp[/bold cyan]   ", end="")
+    line = _build_heatmap_line(temps, [
+        (90, "bold red"), (80, "red"), (70, "yellow"), (60, "green"), (0, "cyan")
+    ])
+    console.print(line)
+    console.print("             [cyan]<60[/] [green]60-70[/] [yellow]70-80[/] [red]80-90[/] [bold red]90+[/]")
+    console.print()
+
+    # Power (relative)
+    powers = stats.get("power_w", {}).get("values", [])
+    if powers:
+        max_pwr = max(powers)
+        console.print("  [bold cyan]⚡ Power[/bold cyan]  ", end="")
+        step = max(1, len(powers) // bar_width)
+        line = Text()
+        for i in range(0, len(powers), step):
+            ratio = powers[i] / max_pwr if max_pwr > 0 else 0
+            if ratio >= 0.9:
+                line.append("██", style="bold red")
+            elif ratio >= 0.7:
+                line.append("██", style="yellow")
+            elif ratio >= 0.4:
+                line.append("██", style="green")
+            else:
+                line.append("██", style="dim")
+        console.print(line)
+        console.print(f"             [dim]<40%[/] [green]40-70%[/] [yellow]70-90%[/] [bold red]90%+[/] (max {max_pwr:.0f}W)")
+        console.print()
+
+    # GPU Load
+    utils = stats.get("util_gpu", {}).get("values", [])
+    if utils:
+        console.print("  [bold cyan]📊 Load[/bold cyan]   ", end="")
+        line = _build_heatmap_line(utils, [
+            (95, "bold green"), (70, "green"), (40, "yellow"), (0, "red")
+        ])
+        console.print(line)
+        console.print("             [red]<40%[/] [yellow]40-70%[/] [green]70-95%[/] [bold green]95%+[/]")
+        console.print()
+
+    # Time axis
+    timestamps = stats.get("_timestamps", [])
+    if timestamps:
+        dur = timestamps[-1]
+        axis = f"             0s ─── {_fmt_duration(dur * 0.25)} ─── {_fmt_duration(dur * 0.5)} ─── {_fmt_duration(dur * 0.75)} ─── {_fmt_duration(dur)}"
+        console.print(f"[dim]{axis}[/dim]")
+        console.print()
+
+
+def render_verdict(stats):
     max_temp = stats.get("temp_c", {}).get("max", 0)
     avg_util = stats.get("util_gpu", {}).get("avg", 0)
 
     if max_temp >= 95:
-        verdict = "REPROVADO"
-        verdict_detail = f"Temperatura atingiu {max_temp}°C — acima do limite seguro!"
+        verdict = "🔴 REPROVADO"
+        detail = f"Temperatura atingiu {max_temp}°C — acima do limite seguro!"
+        border = "red"
     elif max_temp >= 85:
-        verdict = "ATENÇÃO"
-        verdict_detail = f"Temperatura alta ({max_temp}°C). Verifique refrigeração."
+        verdict = "🟡 ATENÇÃO"
+        detail = f"Temperatura alta ({max_temp}°C). Verifique refrigeração."
+        border = "yellow"
     elif max_temp >= 75:
-        verdict = "APROVADO"
-        verdict_detail = f"Temperaturas normais (pico {max_temp}°C). GPU saudável."
+        verdict = "🟢 APROVADO"
+        detail = f"Temperaturas normais (pico {max_temp}°C). GPU saudável."
+        border = "green"
     else:
-        verdict = "APROVADO"
-        verdict_detail = f"Temperaturas excelentes (pico {max_temp}°C). ❄️ GPU fria."
+        verdict = "🟢 APROVADO"
+        detail = f"Temperaturas excelentes (pico {max_temp}°C). ❄️ GPU fria."
+        border = "green"
 
     if avg_util < 50 and stats.get("util_gpu", {}).get("max", 0) > 80:
-        verdict_detail += " ⚠️ Load instável (oscilações grandes)."
+        detail += " ⚠️ Load instável (oscilações grandes)."
 
-    vc = _verdict_color(verdict)
-    verdict_panel = Panel(
-        Align.center(Text(f"\n{verdict}\n\n{verdict_detail}\n", justify="center")),
-        title="[bold]🩺 Diagnóstico[/bold]",
-        border_style=vc.replace("bold ", ""),
-        box=box.DOUBLE_EDGE,
-    )
+    content = Text(justify="center")
+    content.append(f"\n{verdict}\n\n", style=f"bold {border}")
+    content.append(f"{detail}\n", style="white")
 
-    # ── Compose GPU Section ──
-    gpu_title = f"GPU {gpu_idx}: {gpu_name}"
-    console.print()
     console.print(Panel(
-        t,
-        title=f"[bold white]═══ {gpu_title} ═══[/bold white]",
-        border_style="magenta",
+        Align.center(content),
+        title="[bold]🩺 Diagnóstico[/bold]",
+        border_style=border,
         box=box.DOUBLE_EDGE,
-        padding=(0, 1),
+        padding=(0, 2),
     ))
-
-    if peak_table:
-        console.print(peak_table)
-
-    console.print(verdict_panel)
-
-
-def render_timeline_heatmap(stats, gpu_name):
-    """Render a timeline heatmap for temperature using colored blocks."""
-    temps = stats.get("temp_c", {}).get("values", [])
-    powers = stats.get("power_w", {}).get("values", [])
-    timestamps = stats.get("_timestamps", [])
-
-    if not temps:
-        return
-
-    t = Table(
-        title=f"[bold]🗺️  Timeline Heatmap — {gpu_name}[/bold]",
-        box=box.SIMPLE,
-        expand=True,
-    )
-    t.add_column("Métrica", style="bold cyan", min_width=12)
-    t.add_column("Timeline", ratio=1)
-    t.add_column("Legenda", style="dim", min_width=20)
-
-    # Temperature heatmap
-    temp_line = Text()
-    max_width = min(len(temps), 80)
-    step = max(1, len(temps) // max_width)
-    for i in range(0, len(temps), step):
-        temp = temps[i]
-        if temp >= 90:
-            temp_line.append("█", style="bold red")
-        elif temp >= 80:
-            temp_line.append("█", style="red")
-        elif temp >= 70:
-            temp_line.append("█", style="yellow")
-        elif temp >= 60:
-            temp_line.append("█", style="green")
-        else:
-            temp_line.append("█", style="cyan")
-
-    t.add_row("🌡 Temp", temp_line, "[cyan]<60[/] [green]60-70[/] [yellow]70-80[/] [red]80-90[/] [bold red]90+[/]")
-
-    # Power heatmap
-    if powers:
-        pwr_line = Text()
-        max_pwr = max(powers) if powers else 1
-        for i in range(0, len(powers), step):
-            pwr = powers[i]
-            ratio = pwr / max_pwr if max_pwr > 0 else 0
-            if ratio >= 0.9:
-                pwr_line.append("█", style="bold red")
-            elif ratio >= 0.7:
-                pwr_line.append("█", style="yellow")
-            elif ratio >= 0.4:
-                pwr_line.append("█", style="green")
-            else:
-                pwr_line.append("█", style="dim")
-        t.add_row("⚡ Power", pwr_line, f"[dim]<40%[/] [green]40-70%[/] [yellow]70-90%[/] [bold red]90%+[/] (of {max_pwr:.0f}W)")
-
-    # GPU utilization heatmap
-    utils = stats.get("util_gpu", {}).get("values", [])
-    if utils:
-        util_line = Text()
-        for i in range(0, len(utils), step):
-            u = utils[i]
-            if u >= 95:
-                util_line.append("█", style="bold green")
-            elif u >= 70:
-                util_line.append("█", style="green")
-            elif u >= 40:
-                util_line.append("█", style="yellow")
-            else:
-                util_line.append("█", style="red")
-        t.add_row("📊 Load", util_line, "[red]<40%[/] [yellow]40-70%[/] [green]70-95%[/] [bold green]95%+[/]")
-
-    # Time axis
-    if timestamps:
-        dur = timestamps[-1]
-        marks = ["0s"]
-        q_points = [0.25, 0.5, 0.75, 1.0]
-        for q in q_points:
-            marks.append(_fmt_duration(dur * q))
-        t.add_row("⏱️ Tempo", " │ ".join(marks), "")
-
-    console.print()
-    console.print(t)
 
 
 def render_comparison(all_stats, config):
-    """If multiple GPUs, render a side-by-side comparison."""
     if len(all_stats) < 2:
         return
 
     t = Table(
         title="[bold]⚔️  Comparação entre GPUs[/bold]",
-        box=box.DOUBLE_EDGE,
+        box=box.ROUNDED,
         expand=True,
         show_lines=True,
     )
-    t.add_column("Métrica", style="bold cyan")
+    t.add_column("Métrica", style="bold cyan", min_width=16)
 
     gpus = config.get("gpus", [])
     for idx, name in gpus:
-        t.add_column(f"GPU {idx}", style="white", justify="right")
+        t.add_column(f"GPU {idx}", style="white", justify="right", min_width=14)
 
     compare_rows = [
         ("🌡 Temp Máx", "temp_c", "max", "°C"),
         ("🌡 Temp Média", "temp_c", "avg", "°C"),
         ("⚡ Power Máx", "power_w", "max", " W"),
         ("⚡ Power Média", "power_w", "avg", " W"),
-        ("📊 GPU Load Médio", "util_gpu", "avg", "%"),
+        ("📊 Load Médio", "util_gpu", "avg", "%"),
         ("💾 VRAM Máx", "mem_used_gb", "max", " GB"),
-        ("🕐 Core Clock Máx", "clock_core_mhz", "max", " MHz"),
+        ("🕐 Core Clk Máx", "clock_core_mhz", "max", " MHz"),
     ]
 
     for label, key, agg, unit in compare_rows:
@@ -442,10 +479,9 @@ def render_comparison(all_stats, config):
 # ─────────────────────── FILE PICKER ──────────────────────────
 
 def pick_report_file():
-    """Let the user pick a JSON report interactively."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     pattern = os.path.join(script_dir, "gpu_report_*.json")
-    files = sorted(glob.glob(pattern), reverse=True)  # newest first
+    files = sorted(glob.glob(pattern), reverse=True)
 
     if not files:
         console.print("[red]❌ Nenhum relatório encontrado no diretório.[/red]")
@@ -456,7 +492,6 @@ def pick_report_file():
 
     console.print("\n[bold cyan]📂 Relatórios disponíveis:[/bold cyan]\n")
 
-    descriptions = []
     for i, f in enumerate(files, 1):
         basename = os.path.basename(f)
         size_kb = round(os.path.getsize(f) / 1024, 1)
@@ -474,12 +509,11 @@ def pick_report_file():
                 mode_label = MODE_LABELS.get(mode, mode)
                 result = data.get("result", "?")
                 n_snap = len(data.get("snapshots", []))
-                desc = f"{date_str}  │  {mode_label}  │  {n_snap} snaps  │  {size_kb} KB  │  {result[:30]}"
+                desc = f"{date_str}  │  {mode_label}  │  {n_snap} snaps  │  {result[:30]}"
         except Exception:
             desc = f"{basename} ({size_kb} KB)"
 
         console.print(f"  [bold yellow]{i:>2}[/bold yellow]) {desc}")
-        descriptions.append(f)
 
     console.print()
     try:
@@ -498,7 +532,6 @@ def pick_report_file():
 # ─────────────────────── MAIN ─────────────────────────────────
 
 def main():
-    # ── Load report ──
     if len(sys.argv) > 1:
         filepath = sys.argv[1]
     else:
@@ -514,16 +547,14 @@ def main():
     console.clear()
 
     # ── Banner ──
-    banner = Text()
-    banner.append("╔══════════════════════════════════════════════════════════════╗\n", style="bright_blue")
-    banner.append("║          ", style="bright_blue")
-    banner.append("🔍 GPU STRESS TEST — RELATÓRIO DETALHADO", style="bold white")
-    banner.append("          ║\n", style="bright_blue")
-    banner.append("╚══════════════════════════════════════════════════════════════╝", style="bright_blue")
-    console.print(Align.center(banner))
+    console.print()
+    console.print(Align.center(Text(
+        "🔍 GPU STRESS TEST — RELATÓRIO DETALHADO",
+        style="bold white on rgb(20,20,80)",
+    )))
     console.print()
 
-    # ── Header Summary ──
+    # ── Header ──
     render_header(report)
 
     # ── Per-GPU Analysis ──
@@ -532,7 +563,7 @@ def main():
     snapshots = report.get("snapshots", [])
 
     if not snapshots:
-        console.print("\n[yellow]⚠️  Nenhum snapshot gravado neste relatório.[/yellow]")
+        console.print("\n[yellow]⚠️  Nenhum snapshot neste relatório.[/yellow]")
         return
 
     all_stats = {}
@@ -540,26 +571,22 @@ def main():
         stats = compute_gpu_stats(snapshots, gpu_idx)
         all_stats[gpu_idx] = stats
 
-        # Peak data from report
         peak_key = f"gpu_{gpu_idx}_peak"
         peak_data = report.get(peak_key, None)
 
-        render_gpu_stats(stats, gpu_idx, gpu_name, peak_data)
-        render_timeline_heatmap(stats, gpu_name)
+        render_gpu_section(stats, gpu_idx, gpu_name, peak_data)
 
     # ── Multi-GPU comparison ──
     render_comparison(all_stats, config)
 
     # ── Footer ──
     console.print()
-    console.print(Panel(
-        f"  📄 Arquivo: [link=file://{filepath}]{os.path.basename(filepath)}[/link]\n"
-        f"  📏 Tamanho: {round(os.path.getsize(filepath) / 1024, 1)} KB\n"
-        f"  📊 Total de amostras: {len(snapshots)}",
-        title="[dim]Info do Relatório[/dim]",
-        border_style="dim",
-        box=box.SIMPLE,
-    ))
+    console.print(
+        f"  [dim]📄 {os.path.basename(filepath)}  │  "
+        f"{round(os.path.getsize(filepath) / 1024, 1)} KB  │  "
+        f"{len(snapshots)} amostras[/dim]"
+    )
+    console.print()
 
 
 if __name__ == "__main__":
