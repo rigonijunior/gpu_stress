@@ -18,14 +18,24 @@ import math
 import datetime
 import statistics
 
-import questionary
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
-from rich.columns import Columns
-from rich.align import Align
-from rich import box
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.columns import Columns
+    from rich.align import Align
+    from rich import box
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "rich", "-q"])
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.columns import Columns
+    from rich.align import Align
+    from rich import box
 
 
 console = Console()
@@ -444,11 +454,12 @@ def pick_report_file():
     if len(files) == 1:
         return files[0]
 
-    choices = []
-    for f in files:
+    console.print("\n[bold cyan]📂 Relatórios disponíveis:[/bold cyan]\n")
+
+    descriptions = []
+    for i, f in enumerate(files, 1):
         basename = os.path.basename(f)
         size_kb = round(os.path.getsize(f) / 1024, 1)
-        # Try to extract date from filename
         try:
             parts = basename.replace("gpu_report_", "").replace(".json", "")
             dt = datetime.datetime.strptime(parts, "%Y%m%d_%H%M%S")
@@ -456,7 +467,6 @@ def pick_report_file():
         except Exception:
             date_str = "?"
 
-        # Quick peek at mode
         try:
             with open(f, "r") as fh:
                 data = json.load(fh)
@@ -468,16 +478,21 @@ def pick_report_file():
         except Exception:
             desc = f"{basename} ({size_kb} KB)"
 
-        choices.append(questionary.Choice(desc, value=f))
+        console.print(f"  [bold yellow]{i:>2}[/bold yellow]) {desc}")
+        descriptions.append(f)
 
-    selected = questionary.select(
-        "📂 Selecione um relatório para visualizar:",
-        choices=choices,
-    ).ask()
-
-    if not selected:
+    console.print()
+    try:
+        choice = input("  Escolha (número): ").strip()
+        idx = int(choice) - 1
+        if 0 <= idx < len(files):
+            return files[idx]
+        else:
+            console.print("[red]Número inválido.[/red]")
+            sys.exit(1)
+    except (ValueError, EOFError, KeyboardInterrupt):
+        console.print()
         sys.exit(0)
-    return selected
 
 
 # ─────────────────────── MAIN ─────────────────────────────────
