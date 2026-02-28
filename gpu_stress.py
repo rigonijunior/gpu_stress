@@ -30,6 +30,7 @@ warnings.filterwarnings("ignore", message=".*pynvml.*deprecated.*")
 
 import pynvml
 import questionary
+from questionary import Style as QStyle
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -544,9 +545,15 @@ def main():
     if not selected:
         return
 
+    # Custom style to highlight the "all" option in orange
+    menu_style = QStyle([
+        ("highlighted", "fg:orange bold"),
+    ])
+
     mode = questionary.select(
         "🔧 Tipo de estresse:",
         choices=[
+            questionary.Choice("🔁 Todos em Sequência — Executa todos os testes, um após o outro", "all_sequential"),
             questionary.Choice("Compute — Multiplicação de matrizes (estresse nos CUDA cores)", "compute"),
             questionary.Choice("VRAM — Alocação máxima de memória de vídeo", "vram"),
             questionary.Choice("Misto — Compute + VRAM simultaneamente", "mix"),
@@ -556,6 +563,7 @@ def main():
             questionary.Choice("Treinamento de IA — Simulação de Finetuning de Rede Neural", "training"),
             questionary.Choice("Precisão — Alta carga matemática FP64 e INT8", "precision"),
         ],
+        style=menu_style,
     ).ask()
     if not mode:
         return
@@ -585,6 +593,7 @@ def main():
 
     duration_s = dur_choice
     mode_labels = {
+        "all_sequential": "Todos (Sequencial)",
         "compute": "Compute", 
         "vram": "VRAM", 
         "mix": "Misto",
@@ -595,17 +604,22 @@ def main():
         "precision": "Precisão",
     }
 
+    # ── Ordered list of all test modes (for sequential execution) ──
+    ALL_MODES_ORDERED = ["compute", "vram", "mix", "pcie", "transient", "nvenc", "training", "precision"]
+
     # ── Launch workers ──
     abort_event = mp.Event()
     workers = []
-    for idx, name in selected:
-        p = mp.Process(
-            target=STRESS_FUNCTIONS[mode],
-            args=(idx, abort_event),
-            daemon=True,
-        )
-        p.start()
-        workers.append(p)
+
+    if mode != "all_sequential":
+        for idx, name in selected:
+            p = mp.Process(
+                target=STRESS_FUNCTIONS[mode],
+                args=(idx, abort_event),
+                daemon=True,
+            )
+            p.start()
+            workers.append(p)
 
     # ── Monitoring loop ──
     console = Console()
@@ -624,19 +638,80 @@ def main():
         "result": "unknown",
     }
 
+    # ── Sequential-mode helper ──
+    seq_mode_index = [0]  # mutable container for closure access
+    current_mode_label = [mode_labels.get(mode, mode)]  # current display label
+
+    if mode == "all_sequential":
+        # Calculate time per test (equal slices)
+        if duration_s > 0:
+            time_per_test = duration_s / len(ALL_MODES_ORDERED)
+        else:
+            time_per_test = 0  # unlimited: each test runs until manually advanced
+
+        # Launch the first test
+        current_seq_mode = ALL_MODES_ORDERED[0]
+        current_mode_label[0] = f"Seq [{1}/{len(ALL_MODES_ORDERED)}] {mode_labels[current_seq_mode]}"
+        seq_start = time.time()
+        for idx, name in selected:
+            p = mp.Process(
+                target=STRESS_FUNCTIONS[current_seq_mode],
+                args=(idx, abort_event),
+                daemon=True,
+            )
+            p.start()
+            workers.append(p)
+
     try:
         with Live(console=console, screen=True, refresh_per_second=UI_REFRESH_HZ) as live:
             while True:
                 now = time.time()
                 elapsed = now - start_ts
 
-                # ── Duration check ──
-                if duration_s > 0 and elapsed >= duration_s:
+                # ── Sequential mode: advance to next test ──
+                if mode == "all_sequential" and time_per_test > 0:
+                    seq_elapsed = now - seq_start
+                    if seq_elapsed >= time_per_test:
+                        # Stop current workers
+                        abort_event.set()
+                        for w in workers:
+                            w.join(timeout=5)
+                            if w.is_alive():
+                                w.terminate()
+
+                        seq_mode_index[0] += 1
+
+                        # All tests done?
+                        if seq_mode_index[0] >= len(ALL_MODES_ORDERED):
+                            status = "Concluído ✅ (todos os testes)"
+                            metrics = [read_gpu_metrics(i) for i, _ in selected]
+                            current_mode_label[0] = "Todos (Concluído)"
+                            live.update(build_dashboard(metrics, elapsed, duration_s, status, current_mode_label[0]))
+                            time.sleep(0.5)
+                            break
+
+                        # Launch next test
+                        abort_event = mp.Event()
+                        workers = []
+                        current_seq_mode = ALL_MODES_ORDERED[seq_mode_index[0]]
+                        current_mode_label[0] = f"Seq [{seq_mode_index[0]+1}/{len(ALL_MODES_ORDERED)}] {mode_labels[current_seq_mode]}"
+                        seq_start = now
+                        for idx, name_gpu in selected:
+                            p = mp.Process(
+                                target=STRESS_FUNCTIONS[current_seq_mode],
+                                args=(idx, abort_event),
+                                daemon=True,
+                            )
+                            p.start()
+                            workers.append(p)
+
+                # ── Duration check (single-mode only) ──
+                if mode != "all_sequential" and duration_s > 0 and elapsed >= duration_s:
                     status = "Concluído ✅"
                     abort_event.set()
                     # final render
                     metrics = [read_gpu_metrics(i) for i, _ in selected]
-                    live.update(build_dashboard(metrics, elapsed, duration_s, status, mode_labels[mode]))
+                    live.update(build_dashboard(metrics, elapsed, duration_s, status, current_mode_label[0]))
                     time.sleep(0.5)
                     break
 
@@ -648,7 +723,7 @@ def main():
                     if m and m["temp_c"] >= TEMP_LIMIT_C:
                         status = f"🛑 ABORTADO: GPU {m['idx']} atingiu {m['temp_c']}°C!"
                         abort_event.set()
-                        live.update(build_dashboard(metrics, elapsed, duration_s, status, mode_labels[mode]))
+                        live.update(build_dashboard(metrics, elapsed, duration_s, status, current_mode_label[0]))
                         time.sleep(1)
                         raise SystemExit(status)
 
@@ -662,7 +737,7 @@ def main():
                     last_snap = now
 
                 # ── Render ──
-                live.update(build_dashboard(metrics, elapsed, duration_s, status, mode_labels[mode]))
+                live.update(build_dashboard(metrics, elapsed, duration_s, status, current_mode_label[0]))
                 time.sleep(SAMPLE_INTERVAL)
 
     except KeyboardInterrupt:
